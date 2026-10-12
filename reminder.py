@@ -7,7 +7,7 @@ import logging
 import os
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from enum import Enum
@@ -44,9 +44,27 @@ class SubmissionState(str, Enum):
 
 
 class ScanStatus(str, Enum):
-    COMPLETE = "COMPLETE"
-    PARTIAL = "PARTIAL"
-    FAILED = "FAILED"
+    SUCCESS = "SUCCESS"
+    FAILURE = "FAILURE"
+
+
+class CoverageWarning(str, Enum):
+    CLASSIC_QUIZZES = "classic_quiz_listing_unavailable"
+    PLANNER = "planner_supplement_unavailable"
+    SUBMISSION = "submission_unverified"
+
+    @property
+    def message(self) -> str:
+        return {
+            CoverageWarning.CLASSIC_QUIZZES: (
+                "Standalone Classic Quiz coverage is unavailable in some courses; "
+                "assignment-linked quizzes were checked."
+            ),
+            CoverageWarning.PLANNER: "The optional Planner quiz supplement was also unavailable.",
+            CoverageWarning.SUBMISSION: (
+                "Some submissions could not be verified; their known deadlines remain listed."
+            ),
+        }[self]
 
 
 @dataclass
@@ -54,6 +72,7 @@ class ScanResult:
     status: ScanStatus
     deadlines: list[Deadline]
     diagnostics: list[str]
+    warnings: list[CoverageWarning] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -209,6 +228,9 @@ def canvas_operation(path: str) -> str:
         (r"courses", "Course discovery"),
         (r"courses/[0-9]+/assignments", "Course assignment listing"),
         (r"courses/[0-9]+/quizzes", "Course quiz listing"),
+        (r"courses/[0-9]+/tabs", "Course navigation lookup"),
+        (r"planner/items", "Planner quiz supplement"),
+        (r"courses/[0-9]+/quizzes/[0-9]+", "Known quiz lookup"),
         (r"courses/[0-9]+/quizzes/[0-9]+/submission", "Quiz submission lookup"),
         (r"courses/[0-9]+/assignments/[0-9]+", "Linked assignment lookup"),
         (r"courses/[0-9]+/quizzes/assignment_overrides", "Quiz override date lookup"),
@@ -223,6 +245,8 @@ def quiz_override_due_at(records: list[dict], quiz_id: int) -> datetime | None:
     """Use the documented single set of effective dates for the current student."""
     matches = []
     for record in records:
+        if not isinstance(record, dict):
+            raise ServiceError("Quiz override date lookup returned invalid records")
         qid = record.get("quiz_id")
         if isinstance(qid, str) and re.fullmatch(r"[1-9][0-9]*", qid):
             qid = int(qid)
@@ -381,7 +405,8 @@ def gather_deadlines(client: CanvasClient, *, now: datetime, days: int = 7) -> S
         raise ValueError("now must be timezone aware")
     output: list[Deadline] = []
     diagnostics: list[str] = []
-    checked = 0
+    errors: list[str] = []
+    warnings: list[CoverageWarning] = []
     seen_courses: set[int] = set()
 
     def note(message: str):
@@ -389,24 +414,31 @@ def gather_deadlines(client: CanvasClient, *, now: datetime, days: int = 7) -> S
         if message not in diagnostics:
             diagnostics.append(message)
 
+    def warn(warning: CoverageWarning):
+        if warning not in warnings:
+            warnings.append(warning)
+        note(warning.message)
+
+    def required_error(error: ServiceError):
+        if error.fatal:
+            raise error
+        errors.append(str(error))
+        note(str(error))
+
     def add(item: dict, course_id: int, course_name: str, *, quiz: bool = False):
-        nonlocal checked
         aid = item.get("id")
         if not _id(aid):
             raise ServiceError("Canvas returned an invalid activity identifier")
         if item.get("published") is False:
-            checked += 1
             return
         if "due_at" not in item:
             raise ServiceError("An activity deadline was unavailable")
         due = parse_dt(item["due_at"])
         if not _in_window(due, now, days):
-            checked += 1
             return
         if quiz:
             try:
-                # A documented 200 with an empty list confirms never attempted;
-                # a 404 is unavailable information, not an empty submission.
+                # A 200 empty list confirms never attempted; a 404 does not.
                 payload = client.one(f"courses/{course_id}/quizzes/{aid}/submission")
             except ServiceError as error:
                 if error.fatal:
@@ -414,14 +446,10 @@ def gather_deadlines(client: CanvasClient, *, now: datetime, days: int = 7) -> S
                 note(str(error))
                 payload = None
             state = quiz_submission_state(payload)
-            if state == SubmissionState.UNKNOWN:
-                note("Quiz submission lookup could not verify the current attempt")
         else:
             state = submission_state(item.get("submission"))
         if state == SubmissionState.UNKNOWN:
-            note("Some submission information could not be verified")
-        else:
-            checked += 1
+            warn(CoverageWarning.SUBMISSION)
         if state in (SubmissionState.SUBMITTED, SubmissionState.EXCUSED):
             return
         types = item.get("submission_types")
@@ -446,6 +474,72 @@ def gather_deadlines(client: CanvasClient, *, now: datetime, days: int = 7) -> S
             )
         )
 
+    def planner_quizzes(course_id: int) -> list[dict]:
+        # Tabs describe navigation, not the existence or absence of quizzes.
+        try:
+            tabs = client.pages(f"courses/{course_id}/tabs")
+            if not isinstance(tabs, list):
+                raise ServiceError("Course navigation lookup returned invalid tabs")
+            quiz_tabs = [
+                tab for tab in tabs if isinstance(tab, dict) and tab.get("id") == "quizzes"
+            ]
+            if not quiz_tabs:
+                note(
+                    "Course navigation lookup: Quiz tab not available; quiz absence is not established"
+                )
+            elif any(
+                tab.get("hidden") is True or tab.get("visibility") in ("none", "admins")
+                for tab in quiz_tabs
+            ):
+                note(
+                    "Course navigation lookup: Quiz tab restricted or hidden; quiz absence is not established"
+                )
+            else:
+                note(
+                    "Course navigation lookup: Quiz tab listed; quiz-listing failure remains unexplained"
+                )
+        except ServiceError as error:
+            if error.fatal:
+                raise
+            note(str(error))
+        try:
+            records = client.pages(
+                "planner/items",
+                {
+                    "context_codes[]": f"course_{course_id}",
+                    # Broaden by a day for endpoint date-boundary differences;
+                    # authoritative quiz dates still enforce the exact window.
+                    "start_date": (now - timedelta(days=1)).isoformat(),
+                    "end_date": (now + timedelta(days=days + 1)).isoformat(),
+                },
+            )
+            if not isinstance(records, list):
+                raise ServiceError("Planner quiz supplement returned invalid items")
+        except ServiceError as error:
+            if error.fatal:
+                raise
+            note(str(error))
+            warn(CoverageWarning.PLANNER)
+            return []
+        quizzes = []
+        for record in records:
+            if not isinstance(record, dict):
+                warn(CoverageWarning.PLANNER)
+                continue
+            if record.get("plannable_type") != "quiz":
+                continue
+            qid = record.get("plannable_id")
+            if isinstance(qid, str) and re.fullmatch(r"[1-9][0-9]*", qid):
+                qid = int(qid)
+            if not _id(record.get("course_id")) or record["course_id"] != course_id or not _id(qid):
+                warn(CoverageWarning.PLANNER)
+                continue
+            # Planner dates can be created/todo dates. Completion toggles and
+            # summary submission booleans are not actual submission evidence.
+            # Retrieve the known quiz instead of trusting either field.
+            quizzes.append({"id": qid})
+        return quizzes
+
     try:
         courses = client.pages(
             "courses", {"enrollment_state": "active", "enrollment_type": "student"}
@@ -454,7 +548,7 @@ def gather_deadlines(client: CanvasClient, *, now: datetime, days: int = 7) -> S
             raise ServiceError("Canvas returned invalid courses", fatal=True)
         for course in courses:
             if not isinstance(course, dict) or not _id(course.get("id")):
-                note("A course could not be verified")
+                required_error(ServiceError("A course could not be verified"))
                 continue
             course_id = course["id"]
             if course_id in seen_courses:
@@ -468,89 +562,97 @@ def gather_deadlines(client: CanvasClient, *, now: datetime, days: int = 7) -> S
                     f"courses/{course_id}/assignments",
                     {"include[]": "submission", "override_assignment_dates": "true"},
                 )
-                if not assignments:
-                    checked += 1
-                for item in assignments:
-                    try:
-                        if not isinstance(item, dict) or not _id(item.get("id")):
-                            raise ServiceError("Canvas returned an invalid assignment")
-                        if item["id"] in linked_assignments:
-                            continue
-                        linked_assignments.add(item["id"])
-                        if _id(item.get("quiz_id")):
-                            seen_quizzes.add(item["quiz_id"])
-                        add(item, course_id, course_name)
-                    except ServiceError as error:
-                        if error.fatal:
-                            raise
-                        note(str(error))
+                if not isinstance(assignments, list):
+                    raise ServiceError("Canvas returned an invalid assignment listing")
             except ServiceError as error:
-                if error.fatal:
-                    raise
-                note(str(error))
+                required_error(error)
+                # Optional endpoints cannot compensate for missing required coverage.
+                continue
+            for item in assignments:
+                try:
+                    if not isinstance(item, dict) or not _id(item.get("id")):
+                        raise ServiceError("Canvas returned an invalid assignment")
+                    if item["id"] in linked_assignments:
+                        continue
+                    linked_assignments.add(item["id"])
+                    if _id(item.get("quiz_id")):
+                        seen_quizzes.add(item["quiz_id"])
+                    add(item, course_id, course_name)
+                except ServiceError as error:
+                    required_error(error)
+            planner_supplement = False
             try:
                 quizzes = client.pages(f"courses/{course_id}/quizzes")
-                if not quizzes:
-                    checked += 1
-                for item in quizzes:
-                    try:
-                        if not isinstance(item, dict) or not _id(item.get("id")):
-                            raise ServiceError("Canvas returned an invalid quiz")
-                        assignment_id = item.get("assignment_id")
-                        if assignment_id is not None and not _id(assignment_id):
-                            raise ServiceError(
-                                "Canvas returned an invalid linked assignment identifier"
-                            )
-                        if item["id"] in seen_quizzes or assignment_id in linked_assignments:
-                            continue
-                        seen_quizzes.add(item["id"])
-                        if item.get("published") is False:
-                            checked += 1
-                            continue
-                        # A linked quiz uses the assignment's student-specific dates;
-                        # never fall back to its generic quiz date when that lookup fails.
-                        if _id(item.get("assignment_id")):
-                            assignment = client.one(
-                                f"courses/{course_id}/assignments/{item['assignment_id']}",
-                                {"include[]": "submission", "override_assignment_dates": "true"},
-                            )
-                            if (
-                                not isinstance(assignment, dict)
-                                or assignment.get("id") != item["assignment_id"]
-                            ):
-                                raise ServiceError("Linked quiz assignment could not be verified")
-                            if assignment["id"] in linked_assignments:
-                                continue
-                            linked_assignments.add(assignment["id"])
-                            assignment = {**assignment, "is_quiz_assignment": True}
-                            add(assignment, course_id, course_name)
-                        else:
-                            # all_dates may contain only the base date; its existence
-                            # alone does not establish uncertainty or multiple overrides.
-                            if quiz_needs_override_lookup(item):
-                                records = client.pages(
-                                    f"courses/{course_id}/quizzes/assignment_overrides",
-                                    {"quiz_assignment_overrides[][quiz_ids][]": item["id"]},
-                                    list_key="quiz_assignment_overrides",
-                                )
-                                due = quiz_override_due_at(records, item["id"])
-                                item = {**item, "due_at": due.isoformat() if due else None}
-                            add(item, course_id, course_name, quiz=True)
-                    except ServiceError as error:
-                        if error.fatal:
-                            raise
-                        note(str(error))
+                if not isinstance(quizzes, list):
+                    raise ServiceError("Canvas returned an invalid quiz listing")
             except ServiceError as error:
                 if error.fatal:
                     raise
                 note(str(error))
+                warn(CoverageWarning.CLASSIC_QUIZZES)
+                planner_supplement = True
+                quizzes = planner_quizzes(course_id)
+            for item in quizzes:
+                try:
+                    if not isinstance(item, dict) or not _id(item.get("id")):
+                        raise ServiceError("Canvas returned an invalid quiz")
+                    if item["id"] in seen_quizzes:
+                        continue
+                    if planner_supplement:
+                        quiz_id = item["id"]
+                        item = client.one(f"courses/{course_id}/quizzes/{quiz_id}")
+                        if (
+                            not isinstance(item, dict)
+                            or not _id(item.get("id"))
+                            or item["id"] != quiz_id
+                        ):
+                            raise ServiceError("Known quiz lookup returned an invalid quiz")
+                    assignment_id = item.get("assignment_id")
+                    if assignment_id is not None and not _id(assignment_id):
+                        raise ServiceError(
+                            "Canvas returned an invalid linked assignment identifier"
+                        )
+                    if assignment_id in linked_assignments:
+                        seen_quizzes.add(item["id"])
+                        continue
+                    seen_quizzes.add(item["id"])
+                    if item.get("published") is False:
+                        continue
+                    # Linked quizzes always use student-specific assignment dates.
+                    if _id(assignment_id):
+                        assignment = client.one(
+                            f"courses/{course_id}/assignments/{assignment_id}",
+                            {"include[]": "submission", "override_assignment_dates": "true"},
+                        )
+                        if (
+                            not isinstance(assignment, dict)
+                            or not _id(assignment.get("id"))
+                            or assignment["id"] != assignment_id
+                        ):
+                            raise ServiceError("Linked quiz assignment could not be verified")
+                        if assignment["id"] in linked_assignments:
+                            continue
+                        linked_assignments.add(assignment["id"])
+                        add({**assignment, "is_quiz_assignment": True}, course_id, course_name)
+                    else:
+                        if quiz_needs_override_lookup(item):
+                            records = client.pages(
+                                f"courses/{course_id}/quizzes/assignment_overrides",
+                                {"quiz_assignment_overrides[][quiz_ids][]": item["id"]},
+                                list_key="quiz_assignment_overrides",
+                            )
+                            due = quiz_override_due_at(records, item["id"])
+                            item = {**item, "due_at": due.isoformat() if due else None}
+                        add(item, course_id, course_name, quiz=True)
+                except ServiceError as error:
+                    required_error(error)
     except ServiceError as error:
-        return ScanResult(ScanStatus.FAILED, [], [str(error)])
+        note(str(error))
+        return ScanResult(ScanStatus.FAILURE, [], diagnostics, warnings)
     output.sort(key=lambda d: (d.due_at, d.course.lower(), d.title.lower()))
-    status = ScanStatus.PARTIAL if diagnostics else ScanStatus.COMPLETE
-    if diagnostics and not (checked or output):
-        status = ScanStatus.FAILED
-    return ScanResult(status, output, diagnostics)
+    return ScanResult(
+        ScanStatus.FAILURE if errors else ScanStatus.SUCCESS, output, diagnostics, warnings
+    )
 
 
 def _short(value: str, limit: int = 90) -> str:
@@ -581,21 +683,22 @@ def make_messages(
 ) -> list[str]:
     date_str = now.astimezone(SGT).strftime("%a, %d %b %Y")
     header = f"📅 <b>NUS Canvas daily digest</b> · {date_str} (SGT)"
-    status = items.status if isinstance(items, ScanResult) else ScanStatus.COMPLETE
-    if status == ScanStatus.FAILED:
+    status = items.status if isinstance(items, ScanResult) else ScanStatus.SUCCESS
+    if status == ScanStatus.FAILURE:
         return [
             "⚠️ The daily Canvas scan could not be completed. Check Canvas directly for deadlines."
         ]
+    warnings = items.warnings if isinstance(items, ScanResult) else []
     if isinstance(items, ScanResult):
         items = items.deadlines
-    warning = "⚠️ Partial scan: some courses, deadlines or submissions could not be verified. Check Canvas directly."
+    warning = "⚠️ " + " ".join(w.message for w in warnings) + " Check Canvas directly."
     urgent = [d for d in items if d.due_at <= now + timedelta(hours=urgent_hours)]
     later = [d for d in items if d.due_at > now + timedelta(hours=urgent_hours)]
     lines = []
-    if status == ScanStatus.PARTIAL:
+    if warnings:
         lines.append(warning)
     if not items:
-        if status == ScanStatus.PARTIAL:
+        if warnings:
             return [
                 f"{header}\n\n{warning}\nNo upcoming items found in the information checked; this is not an all clear."
             ]
@@ -687,7 +790,7 @@ def main() -> int:
             result = gather_deadlines(CanvasClient(token), now=now, days=days)
         except Exception:
             result = ScanResult(
-                ScanStatus.FAILED, [], ["Unexpected scan failure; details suppressed"]
+                ScanStatus.FAILURE, [], ["Unexpected scan failure; details suppressed"]
             )
         for diagnostic in result.diagnostics:
             LOG.warning("Canvas scan: %s", diagnostic)
@@ -704,13 +807,13 @@ def main() -> int:
                 )
                 raise
             delivered += 1
-        LOG.info("Scan %s; Telegram confirmed %d messages", result.status.value, delivered)
-        return 0 if result.status == ScanStatus.COMPLETE else 1
+        LOG.info("Reminder %s; Telegram confirmed %d messages", result.status.value, delivered)
+        return 0 if result.status == ScanStatus.SUCCESS else 1
     except ServiceError as e:
-        LOG.error("Reminder failed: %s", e)
+        LOG.error("Reminder FAILURE: %s", e)
         return 1
     except Exception:
-        LOG.error("Reminder failed unexpectedly (details suppressed to protect secrets)")
+        LOG.error("Reminder FAILURE unexpectedly (details suppressed to protect secrets)")
         return 1
 
 

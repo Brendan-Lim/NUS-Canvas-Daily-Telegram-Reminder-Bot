@@ -53,12 +53,16 @@ coursework, grade data, or private screenshots to public reports. Use fictional 
 
 ## Operational limitations
 
-Complete scans cover only documented supported API data. Partial results warn
-that some information was not checked; they cannot establish an all clear.
-Authentication or unsafe responses fail closed. Partial and failed scans return
-nonzero even if their Telegram warning arrives. Delivery timeouts can leave an
-uncertain or partial delivery; no exactly-once guarantee or automatic send retry
-is provided. Check Canvas directly when a warning appears or reminders stop.
+Operational outcomes are SUCCESS or FAILURE. Success means required processing
+and Telegram delivery completed, not exhaustive Canvas coverage. Inaccessible
+standalone Classic Quiz listings are optional only after required assignment
+retrieval succeeds. Coverage warnings remain visible even if Planner recovers
+known quizzes. Unknown submissions retain their known deadlines; an empty digest
+with coverage warnings cannot establish an all clear. Required retrieval or date
+failures, authentication failures, and unsafe responses fail closed and return
+nonzero even if their failure notification arrives. Delivery timeouts can leave
+an uncertain or partial delivery; no exactly-once guarantee or automatic send
+retry is provided. Check Canvas directly when warnings appear or reminders stop.
 
 Mocked tests cannot establish live service compatibility, institution permissions,
 or successful secret provisioning for your account. Test your own private copy

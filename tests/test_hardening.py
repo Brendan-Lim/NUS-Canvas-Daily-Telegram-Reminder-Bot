@@ -162,14 +162,14 @@ class ClassificationTests(unittest.TestCase):
 class ScanTests(unittest.TestCase):
     def test_complete_empty_scan(self):
         result = r.gather_deadlines(FakeCanvas([], []), now=NOW)
-        self.assertEqual(result.status, r.ScanStatus.COMPLETE)
+        self.assertEqual(result.status, r.ScanStatus.SUCCESS)
         self.assertIn("No incomplete", r.make_messages(result, now=NOW)[0])
 
     def test_course_list_failure(self):
         c = Mock()
         c.pages.side_effect = r.ServiceError("Canvas API request failed (HTTP 403)")
         result = r.gather_deadlines(c, now=NOW)
-        self.assertEqual(result.status, r.ScanStatus.FAILED)
+        self.assertEqual(result.status, r.ScanStatus.FAILURE)
         self.assertIn("Check Canvas directly", r.make_messages(result, now=NOW)[0])
 
     def test_independent_course_continues(self):
@@ -184,26 +184,26 @@ class ScanTests(unittest.TestCase):
 
         c.pages.side_effect = pages
         result = r.gather_deadlines(c, now=NOW)
-        self.assertEqual(result.status, r.ScanStatus.PARTIAL)
+        self.assertEqual(result.status, r.ScanStatus.FAILURE)
         self.assertEqual(len(result.deadlines), 1)
 
     def test_no_useful_scan_is_failed(self):
         c = Mock()
         c.pages.side_effect = [[{"id": 1}], r.ServiceError("HTTP 403"), r.ServiceError("HTTP 404")]
-        self.assertEqual(r.gather_deadlines(c, now=NOW).status, r.ScanStatus.FAILED)
+        self.assertEqual(r.gather_deadlines(c, now=NOW).status, r.ScanStatus.FAILURE)
 
-    def test_optional_endpoint_failure_is_partial_not_all_clear(self):
+    def test_optional_endpoint_failure_succeeds_with_warning_not_all_clear(self):
         c = Mock()
-        c.pages.side_effect = [[{"id": 1}], [], r.ServiceError("HTTP 404")]
+        c.pages.side_effect = [[{"id": 1}], [], r.ServiceError("HTTP 404"), [], []]
         result = r.gather_deadlines(c, now=NOW)
-        self.assertEqual(result.status, r.ScanStatus.PARTIAL)
+        self.assertEqual(result.status, r.ScanStatus.SUCCESS)
         msg = r.make_messages(result, now=NOW)[0]
-        self.assertIn("Partial scan", msg)
+        self.assertIn("Standalone Classic Quiz coverage", msg)
         self.assertNotIn("No incomplete", msg)
 
     def test_unknown_submission_retains_deadline(self):
         result = r.gather_deadlines(FakeCanvas([assignment(submission=None)], []), now=NOW)
-        self.assertEqual(result.status, r.ScanStatus.PARTIAL)
+        self.assertEqual(result.status, r.ScanStatus.SUCCESS)
         self.assertTrue(result.deadlines[0].submission_unknown)
         self.assertIn("submission unverified", r.make_messages(result, now=NOW)[0])
 
@@ -211,7 +211,7 @@ class ScanTests(unittest.TestCase):
         c = FakeCanvas([], [{"id": 8, "title": "Fictional quiz", "due_at": iso(timedelta(days=1))}])
         c.one = Mock(return_value=None)
         result = r.gather_deadlines(c, now=NOW)
-        self.assertEqual(result.status, r.ScanStatus.PARTIAL)
+        self.assertEqual(result.status, r.ScanStatus.SUCCESS)
         self.assertEqual(len(result.deadlines), 1)
         c.one.assert_called_once_with("courses/101/quizzes/8/submission")
 
@@ -221,17 +221,19 @@ class ScanTests(unittest.TestCase):
                 c = FakeCanvas([], [{"id": 8, "due_at": iso(timedelta(days=1))}])
                 c.one = Mock(side_effect=r.ServiceError(f"HTTP {status}"))
                 result = r.gather_deadlines(c, now=NOW)
-                self.assertEqual(result.status, r.ScanStatus.PARTIAL)
+                self.assertEqual(result.status, r.ScanStatus.SUCCESS)
                 self.assertTrue(result.deadlines[0].submission_unknown)
 
-    def test_unpublished_only_valid_scan_with_failed_quizzes_is_partial(self):
+    def test_unpublished_assignment_and_unavailable_quizzes_succeed_with_warning(self):
         c = Mock()
         c.pages.side_effect = [
             [{"id": 1}],
             [assignment(published=False)],
             r.ServiceError("HTTP 404"),
+            [],
+            [],
         ]
-        self.assertEqual(r.gather_deadlines(c, now=NOW).status, r.ScanStatus.PARTIAL)
+        self.assertEqual(r.gather_deadlines(c, now=NOW).status, r.ScanStatus.SUCCESS)
 
     def test_excused_and_unpublished_filtered(self):
         result = r.gather_deadlines(
@@ -282,7 +284,7 @@ class ScanTests(unittest.TestCase):
         c = FakeCanvas([], [{"id": 9, "assignment_id": 1, "due_at": iso(timedelta(days=1))}])
         c.one = Mock(side_effect=r.ServiceError("HTTP 403"))
         result = r.gather_deadlines(c, now=NOW)
-        self.assertEqual(result.status, r.ScanStatus.PARTIAL)
+        self.assertEqual(result.status, r.ScanStatus.FAILURE)
         self.assertEqual(result.deadlines, [])
 
     def test_fatal_failure_discards_collected_data(self):
@@ -293,7 +295,7 @@ class ScanTests(unittest.TestCase):
             r.ServiceError("Unsafe URL", fatal=True),
         ]
         result = r.gather_deadlines(c, now=NOW)
-        self.assertEqual(result.status, r.ScanStatus.FAILED)
+        self.assertEqual(result.status, r.ScanStatus.FAILURE)
         self.assertEqual(result.deadlines, [])
 
     def test_malformed_records_safe(self):
@@ -301,7 +303,7 @@ class ScanTests(unittest.TestCase):
             with self.subTest(courses=courses):
                 c = Mock()
                 c.pages.return_value = courses
-                self.assertEqual(r.gather_deadlines(c, now=NOW).status, r.ScanStatus.FAILED)
+                self.assertEqual(r.gather_deadlines(c, now=NOW).status, r.ScanStatus.FAILURE)
 
 
 class CanvasTransportTests(unittest.TestCase):
@@ -473,7 +475,7 @@ class DeliveryTests(unittest.TestCase):
         with self.assertRaises(r.ServiceError):
             r.send_telegram("😀" * 3000, bot_token="fictional", chat_id="123", session=Mock())
 
-    def test_main_complete_partial_failed_exit_codes(self):
+    def test_main_binary_exit_codes(self):
         for status in r.ScanStatus:
             with (
                 self.subTest(status=status),
@@ -481,7 +483,7 @@ class DeliveryTests(unittest.TestCase):
                 patch("reminder.gather_deadlines", return_value=r.ScanResult(status, [], [])),
                 patch("reminder.send_telegram") as send,
             ):
-                self.assertEqual(r.main(), 0 if status == r.ScanStatus.COMPLETE else 1)
+                self.assertEqual(r.main(), 0 if status == r.ScanStatus.SUCCESS else 1)
                 send.assert_called_once()
 
     def test_unexpected_scan_failure_notifies(self):
@@ -499,7 +501,7 @@ class DeliveryTests(unittest.TestCase):
             patch.dict(os.environ, self.ENV, clear=True),
             patch(
                 "reminder.gather_deadlines",
-                return_value=r.ScanResult(r.ScanStatus.COMPLETE, [], []),
+                return_value=r.ScanResult(r.ScanStatus.SUCCESS, [], []),
             ),
             patch("reminder.make_messages", return_value=["a", "b", "c"]),
             patch("reminder.send_telegram", side_effect=[None, r.ServiceError("HTTP 500")]) as send,
