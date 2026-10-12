@@ -213,7 +213,7 @@ class ScanTests(unittest.TestCase):
         result = r.gather_deadlines(c, now=NOW)
         self.assertEqual(result.status, r.ScanStatus.PARTIAL)
         self.assertEqual(len(result.deadlines), 1)
-        c.one.assert_called_once_with("courses/101/quizzes/8/submission", not_found_ok=True)
+        c.one.assert_called_once_with("courses/101/quizzes/8/submission")
 
     def test_quiz_submission_http_failure_retains_known_deadline(self):
         for status in (403, 500, 502, 503, 504):

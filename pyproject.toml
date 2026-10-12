@@ -7,5 +7,5 @@ select = ["E4", "E7", "E9", "F", "I", "S"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*.py" = ["S105", "S106"] # fictional credentials
-"tools/setup_telegram.py" = ["S603", "S607"] # fixed gh executable, argument list, no shell
+"tools/setup_telegram.py" = ["E402", "S603", "S607"] # version guard before imports; fixed gh/git executables, no shell
 "tools/scan_secrets.py" = ["S603", "S607"] # fixed git executable, argument list, no shell

@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -201,6 +202,69 @@ def _retry_delay(value: str | None, attempt: int) -> float:
     return delay
 
 
+def canvas_operation(path: str) -> str:
+    """Fixed labels only: never return identifiers, URLs or query parameters."""
+    path = path.removeprefix("/api/v1/")
+    patterns = (
+        (r"courses", "Course discovery"),
+        (r"courses/[0-9]+/assignments", "Course assignment listing"),
+        (r"courses/[0-9]+/quizzes", "Course quiz listing"),
+        (r"courses/[0-9]+/quizzes/[0-9]+/submission", "Quiz submission lookup"),
+        (r"courses/[0-9]+/assignments/[0-9]+", "Linked assignment lookup"),
+        (r"courses/[0-9]+/quizzes/assignment_overrides", "Quiz override date lookup"),
+    )
+    return next(
+        (label for pattern, label in patterns if re.fullmatch(pattern, path)),
+        "Other Canvas operation",
+    )
+
+
+def quiz_override_due_at(records: list[dict], quiz_id: int) -> datetime | None:
+    """Use the documented single set of effective dates for the current student."""
+    matches = []
+    for record in records:
+        qid = record.get("quiz_id")
+        if isinstance(qid, str) and re.fullmatch(r"[1-9][0-9]*", qid):
+            qid = int(qid)
+        if not _id(qid):
+            raise ServiceError("Quiz override date lookup returned invalid identifiers")
+        if qid == quiz_id:
+            matches.append(record)
+    if len(matches) != 1:
+        raise ServiceError("Quiz override date lookup did not return one matching quiz")
+    dates = matches[0].get("due_dates")
+    if not isinstance(dates, list) or len(dates) != 1 or not isinstance(dates[0], dict):
+        raise ServiceError("Quiz override date lookup returned missing or ambiguous student dates")
+    if "due_at" not in dates[0]:
+        raise ServiceError("Quiz override date lookup did not supply a deadline")
+    try:
+        return parse_dt(dates[0]["due_at"])
+    except ServiceError:
+        raise ServiceError("Quiz override date lookup returned an invalid timestamp") from None
+
+
+def quiz_needs_override_lookup(quiz: dict) -> bool:
+    """A matching, sole documented base date applies to all students already."""
+    if quiz.get("only_visible_to_overrides") is True:
+        return True
+    dates = quiz.get("all_dates")
+    if dates is None or dates == []:
+        return False
+    if (
+        isinstance(dates, list)
+        and len(dates) == 1
+        and isinstance(dates[0], dict)
+        and dates[0].get("base") is True
+        and "due_at" in dates[0]
+        and "due_at" in quiz
+    ):
+        try:
+            return parse_dt(dates[0]["due_at"]) != parse_dt(quiz["due_at"])
+        except ServiceError:
+            pass
+    return True
+
+
 class CanvasClient:
     def __init__(self, token: str, session: requests.Session | None = None):
         self.session = session or requests.Session()
@@ -212,41 +276,48 @@ class CanvasClient:
     def _request(self, url: str, params: dict | None = None, *, not_found_ok: bool = False):
         if not _valid_canvas_url(url):
             raise ServiceError("Canvas supplied an unsafe pagination URL", fatal=True)
+        operation = canvas_operation(urlparse(url).path)
         for attempt in range(MAX_ATTEMPTS):
             remaining = self.expires - time.monotonic()
             if remaining < sum(REQUEST_TIMEOUT):
-                raise ServiceError("Canvas scan runtime limit reached")
+                raise ServiceError(f"{operation} failed: Canvas scan runtime limit reached")
             try:
                 response = self.session.get(
                     url, params=params, timeout=REQUEST_TIMEOUT, allow_redirects=False
                 )
             except requests.exceptions.SSLError:
-                raise ServiceError("Canvas TLS verification failed", fatal=True) from None
+                raise ServiceError(
+                    f"{operation} failed: Canvas TLS verification failed", fatal=True
+                ) from None
             except (requests.ConnectionError, requests.Timeout):
                 if attempt == MAX_ATTEMPTS - 1:
-                    raise ServiceError("Unable to reach NUS Canvas after bounded retries") from None
+                    raise ServiceError(
+                        f"{operation} failed: unable to reach Canvas after bounded retries"
+                    ) from None
                 delay = _retry_delay(None, attempt)
             except requests.RequestException:
-                raise ServiceError("Canvas request failed safely") from None
+                raise ServiceError(f"{operation} failed safely") from None
             else:
                 if response.status_code not in (429, 500, 502, 503, 504):
                     break
                 if attempt == MAX_ATTEMPTS - 1:
                     raise ServiceError(
-                        f"Canvas request failed after bounded retries (HTTP {response.status_code})"
+                        f"{operation} failed after bounded retries (HTTP {response.status_code})"
                     )
                 delay = _retry_delay(response.headers.get("Retry-After"), attempt)
             if time.monotonic() + delay + sum(REQUEST_TIMEOUT) > self.expires:
-                raise ServiceError("Canvas scan runtime limit reached")
+                raise ServiceError(f"{operation} failed: Canvas scan runtime limit reached")
             time.sleep(delay)
         if response.status_code == 404 and not_found_ok:
             return None
         if response.status_code == 401:
-            raise ServiceError("Canvas API token is invalid or expired", fatal=True)
+            raise ServiceError(
+                f"{operation} failed: Canvas API token is invalid or expired (HTTP 401)", fatal=True
+            )
         if 300 <= response.status_code < 400:
-            raise ServiceError("Canvas redirect refused", fatal=True)
+            raise ServiceError(f"{operation} failed: Canvas redirect refused", fatal=True)
         if not 200 <= response.status_code < 300:
-            raise ServiceError(f"Canvas API request failed (HTTP {response.status_code})")
+            raise ServiceError(f"{operation} failed (HTTP {response.status_code})")
         return response
 
     def one(self, path: str, params: dict | None = None, *, not_found_ok: bool = False):
@@ -258,10 +329,17 @@ class CanvasClient:
         try:
             return result.json()
         except ValueError:
-            raise ServiceError("Canvas returned invalid JSON") from None
+            raise ServiceError(
+                f"{canvas_operation(path)} failed: Canvas returned invalid JSON"
+            ) from None
 
     def pages(
-        self, path: str, params: dict | None = None, *, not_found_ok: bool = False
+        self,
+        path: str,
+        params: dict | None = None,
+        *,
+        not_found_ok: bool = False,
+        list_key: str | None = None,
     ) -> list[dict]:
         url = f"{CANVAS_ORIGIN}/api/v1/{path.lstrip('/')}"
         initial_params = {"per_page": 100, **(params or {})}
@@ -275,13 +353,19 @@ class CanvasClient:
                 url, params=initial_params, not_found_ok=not_found_ok and len(seen) == 1
             )
             if response is None:
-                raise ServiceError("Canvas endpoint unavailable (HTTP 404)")
+                raise ServiceError(f"{canvas_operation(path)} unavailable (HTTP 404)")
             try:
                 page = response.json()
             except ValueError:
-                raise ServiceError("Canvas returned invalid JSON") from None
+                raise ServiceError(
+                    f"{canvas_operation(path)} failed: Canvas returned invalid JSON"
+                ) from None
+            if list_key is not None:
+                page = page.get(list_key) if isinstance(page, dict) else None
             if not isinstance(page, list) or not all(isinstance(item, dict) for item in page):
-                raise ServiceError("Unexpected Canvas list response")
+                raise ServiceError(
+                    f"{canvas_operation(path)} failed: unexpected Canvas list response"
+                )
             collected.extend(page)
             next_url = response.links.get("next", {}).get("url")
             if not next_url:
@@ -321,15 +405,17 @@ def gather_deadlines(client: CanvasClient, *, now: datetime, days: int = 7) -> S
             return
         if quiz:
             try:
-                payload = client.one(
-                    f"courses/{course_id}/quizzes/{aid}/submission", not_found_ok=True
-                )
+                # A documented 200 with an empty list confirms never attempted;
+                # a 404 is unavailable information, not an empty submission.
+                payload = client.one(f"courses/{course_id}/quizzes/{aid}/submission")
             except ServiceError as error:
                 if error.fatal:
                     raise
                 note(str(error))
                 payload = None
             state = quiz_submission_state(payload)
+            if state == SubmissionState.UNKNOWN:
+                note("Quiz submission lookup could not verify the current attempt")
         else:
             state = submission_state(item.get("submission"))
         if state == SubmissionState.UNKNOWN:
@@ -439,13 +525,16 @@ def gather_deadlines(client: CanvasClient, *, now: datetime, days: int = 7) -> S
                             assignment = {**assignment, "is_quiz_assignment": True}
                             add(assignment, course_id, course_name)
                         else:
-                            # Standalone Classic Quiz dates can contain overrides we
-                            # cannot reliably resolve. Show supplied dates with a warning.
-                            if (
-                                item.get("all_dates")
-                                or item.get("only_visible_to_overrides") is True
-                            ):
-                                note("Standalone quiz override dates require checking Canvas")
+                            # all_dates may contain only the base date; its existence
+                            # alone does not establish uncertainty or multiple overrides.
+                            if quiz_needs_override_lookup(item):
+                                records = client.pages(
+                                    f"courses/{course_id}/quizzes/assignment_overrides",
+                                    {"quiz_assignment_overrides[][quiz_ids][]": item["id"]},
+                                    list_key="quiz_assignment_overrides",
+                                )
+                                due = quiz_override_due_at(records, item["id"])
+                                item = {**item, "due_at": due.isoformat() if due else None}
                             add(item, course_id, course_name, quiz=True)
                     except ServiceError as error:
                         if error.fatal:

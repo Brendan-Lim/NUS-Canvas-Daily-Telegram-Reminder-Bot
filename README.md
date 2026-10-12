@@ -95,11 +95,19 @@ Run the commands for your computer:
 <details>
 <summary><strong>macOS and Linux</strong></summary>
 
+On macOS with [Homebrew](https://brew.sh/), install the versioned interpreter:
+
 ```bash
-python3 --version # must be 3.12 or newer
-python3 -m venv .venv
+brew install python@3.12
+```
+
+On Linux, install Python 3.12 with your distribution's package manager or from [python.org](https://www.python.org/downloads/). Use `python3.12` explicitly; `python3` may still point to an older system version.
+
+```bash
+python3.12 --version
+python3.12 -m venv .venv
 .venv/bin/python -m pip install --only-binary=:all: --require-hashes -r requirements.txt
-.venv/bin/python tools/setup_telegram.py --repo YOUR-NAME/YOUR-REPO
+.venv/bin/python tools/setup_telegram.py
 ```
 
 </details>
@@ -110,18 +118,16 @@ python3 -m venv .venv
 ```powershell
 py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --only-binary=:all: --require-hashes -r requirements.txt
-.\.venv\Scripts\python.exe tools/setup_telegram.py --repo YOUR-NAME/YOUR-REPO
+.\.venv\Scripts\python.exe tools/setup_telegram.py
 ```
 
 </details>
 
-Paste your Canvas and bot tokens into the **hidden terminal prompts**. The wizard checks that your repository is private and you have administration permission. Open the bot link it shows, then send its exact command in **your bot's private Telegram chat** while setup waits:
+Setup detects the repository from your checkout, verifies that it is private and you have administration permission, and shows its canonical name. Check that destination, then type **`yes` in the terminal** to confirm replacing its three reminder secrets. Paste your Canvas and bot tokens into the **hidden terminal prompts**.
 
-```text
-/start <pairing-code-shown-by-the-wizard>
-```
+**Next, switch to Telegram.** Open the bot link shown by the wizard in **your own bot's private chat**. Copy the actual `/start CODE` message printed by the wizard and send it **inside Telegram, not Terminal or PowerShell**. No placeholder needs to be typed or substituted.
 
-The random code expires after **five minutes**. Keep it private: it authorizes the reminder destination. Send the pairing code only, never either API token. The wizard discovers your Chat ID and saves all three Actions secrets automatically.
+Keep the terminal running while verification waits. The random code expires after **five minutes** and authorizes the destination, so keep it private. Never paste either API token into Telegram. The wizard discovers your Chat ID and saves all three Actions secrets automatically.
 
 ### 5. Send a test reminder
 
@@ -139,6 +145,8 @@ A complete scan sends a digest even if nothing is due. Partial and failed scans 
 | `TELEGRAM_CHAT_ID` | Your automatically verified private chat destination. |
 
 Setup uses your authenticated local GitHub CLI session with permission to manage repository Actions secrets. You do not need to create a separate personal access token. The default workflow `GITHUB_TOKEN` cannot perform this setup.
+
+If several remotes point to different repositories, use `--repo OWNER/REPOSITORY` to select your private copy explicitly. The selected repository must match a safe GitHub remote in the checkout. Setup refuses the public template, unsafe remotes, and unconfirmed destinations.
 
 Tokens stay in process memory and go to `gh` through stdin, not command arguments or tracked files. The wizard briefly polls Telegram and exits; it does not depend on old retained messages. Only a correctly paired private user is accepted. Multiple users presenting the code in received updates cause pairing to fail. Anyone who learns the code before pairing finishes could claim the destination; start again if it is exposed.
 
@@ -167,7 +175,7 @@ The script runs once, checks supported deadlines, sends a digest, and exits. The
 | **Classic Quizzes** | Available quiz endpoints; linked assignment records prevent duplicates and generic-date fallback. Standalone quizzes use the current-user submission endpoint. |
 | **New Quizzes** | Canvas assignment records, labelled as quizzes when Canvas identifies them. |
 
-Standalone Classic Quiz dates may not resolve individual overrides. Reported override information triggers a partial warning; verify these quizzes in Canvas. This project does not detect every Canvas activity type.
+Standalone Classic Quizzes use Canvas's current-student dates. A sole matching base date is already valid for everyone; other override metadata is resolved through the documented quiz assignment overrides endpoint. If required student dates are unavailable or ambiguous, the quiz is omitted with a partial warning rather than given a generic fallback date. This project does not detect every Canvas activity type.
 
 <details>
 <summary><strong>Submission filtering and activities outside the supported scope</strong></summary>
@@ -175,6 +183,7 @@ Standalone Classic Quiz dates may not resolve individual overrides. Reported ove
 - Current `unsubmitted` states and instructor reassignment (`redo_request`) remain incomplete even with previous attempts, grades, or timestamps.
 - Submitted and pending-review states confirm submission. Graded submissions require actual submission evidence; a grade or attempt count alone is insufficient. Excused work is excluded separately.
 - Missing or malformed submission information is **unknown**, not confirmed incomplete. A known deadline is retained with “submission unverified.” A null due date has no deadline; missing or invalid dates are never invented.
+- A successful current-user quiz submission response with an empty `quiz_submissions` list confirms a never-attempted quiz. A missing, malformed, restricted, or HTTP 404 response remains unknown; it does not confirm incompletion.
 - Paper, external-tool, discussion, and other assignments can appear when Canvas exposes a due date, but completion information may be unavailable.
 - Modules, announcements, peer-review tasks, calendar-only events, and third-party activities are not comprehensively covered.
 - Unpublished records are excluded. Locked but published work can still have an upcoming deadline.
@@ -232,6 +241,23 @@ Removing a GitHub secret alone does not revoke the token at its provider. Never 
 ## Troubleshooting
 
 <details>
+<summary><strong>Python 3.9, “No matching distribution”, or missing Requests</strong></summary>
+
+Installing a newer Python does not update an existing `.venv`. From your project folder, first leave any activated environment with `deactivate` (only if it is active). Then recreate **this project's `.venv` only**:
+
+```bash
+python3.12 -m venv --clear .venv
+.venv/bin/python -m pip install --only-binary=:all: --require-hashes -r requirements.txt
+.venv/bin/python tools/setup_telegram.py
+```
+
+On Windows, use `py -3.12 -m venv --clear .venv` and the `.\.venv\Scripts\python.exe` commands above. `--clear` replaces the contents of `.venv`; do not use it on a shared or symlinked environment, or store project files there. Nothing outside that environment needs to be deleted. Keep dependency pins and hash verification intact.
+
+If Python is already 3.12+ and Requests is missing, run just the hash-verified install command and retry setup. Setup reports an unsupported interpreter or missing dependencies before requesting credentials.
+
+</details>
+
+<details>
 <summary><strong>Pairing expires, no updates arrive, or a webhook conflicts</strong></summary>
 
 Rerun setup and send its **new exact command** to your bot while it waits. Stop other polling tools; old messages are not a setup mechanism.
@@ -245,6 +271,8 @@ For a webhook or HTTP 409 conflict, use a new dedicated bot or remove your own w
 
 Run `gh auth login`, confirm your private repository name, and check that you have administration permission. Rerun setup after a partial secret update so all three values are consistent.
 
+If repository detection fails, run setup from your cloned private repository. Check its GitHub remotes; use `--repo OWNER/REPOSITORY` only to select a matching private remote. Review the displayed destination before typing `yes`. Setup will not place personal secrets in this public template.
+
 </details>
 
 <details>
@@ -253,6 +281,8 @@ Run `gh auth login`, confirm your private repository name, and check that you ha
 - **HTTP 401:** generate a new personal Canvas token, replace `CANVAS_TOKEN`, and revoke the old token.
 - **HTTP 403/404 or a partial warning:** check Canvas directly. Your institution or course may restrict endpoints; an unavailable endpoint is not an empty result.
 - **HTTP 429 or a server error:** retries are bounded. Try a later manual run and check Canvas directly meanwhile.
+
+Logs now name the failing operation, such as **Course quiz listing**, **Quiz submission lookup**, **Linked assignment lookup**, or **Quiz override date lookup**, without identifiers or coursework. A digest can be accurate yet partial because submission information remains unknown. Partial scans intentionally keep their nonzero exit code; a delivered message does not establish completeness. See the [Canvas API compatibility notes](docs/CANVAS_API.md) for the documented contracts and live verification steps.
 
 </details>
 
