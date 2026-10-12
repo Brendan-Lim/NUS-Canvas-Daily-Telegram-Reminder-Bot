@@ -1,0 +1,24 @@
+name: Bug report
+description: Report a reproducible problem without sharing credentials
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: "Please do not paste Canvas tokens, Telegram bot tokens, chat IDs, or private coursework into this issue."
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      placeholder: Describe the behavior and any *redacted* error messages.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce using fictional data

@@ -1,0 +1,17 @@
+name: Feature request
+description: Suggest an improvement for students
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What would you like to improve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Suggested solution
+  - type: markdown
+    attributes:
+      value: "Please never include real Canvas or Telegram credentials or personal student data."
