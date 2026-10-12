@@ -272,7 +272,8 @@ class ProvisioningTests(unittest.TestCase):
         telegram.prepare.return_value = "fictional_bot"
         with (
             patch("sys.argv", ["setup", "--repo", "fictional/private"]),
-            patch("tools.setup_telegram.verify_repository", return_value="fictional/private"),
+            patch("tools.setup_telegram.resolve_repository", return_value="fictional/private"),
+            patch("builtins.input", return_value="yes"),
             patch(
                 "tools.setup_telegram.hidden",
                 side_effect=["canvas-private-value", "123:bot-private-value"],

@@ -2,6 +2,40 @@
 
 from __future__ import annotations
 
+import sys
+
+
+def setup_environment_help(*, recreate: bool = False) -> str:
+    """Stdlib-only help, safe even before Requests or other imports are available."""
+    windows = sys.platform == "win32"
+    launcher = "py -3.12" if windows else "python3.12"
+    python = r".\.venv\Scripts\python.exe" if windows else ".venv/bin/python"
+    lines = []
+    if sys.platform == "darwin":
+        lines.append("On macOS with Homebrew: brew install python@3.12")
+    lines.append("From your project folder, use Python 3.12 to create the project environment:")
+    lines.append(f"{launcher} -m venv {'--clear ' if recreate else ''}.venv")
+    if recreate:
+        lines.append(
+            "--clear replaces only the project .venv contents. Do not use a shared or symlinked environment."
+        )
+    lines.append(
+        f"{python} -m pip install --only-binary=:all: --require-hashes -r requirements.txt"
+    )
+    lines.append(f"{python} tools/setup_telegram.py")
+    return "\n".join(lines)
+
+
+# Run before optional imports and any setup work, including argument parsing.
+if sys.version_info[:2] < (3, 12):
+    print(
+        "Setup requires Python 3.12 or newer; detected Python "
+        + ".".join(map(str, sys.version_info[:3]))
+        + "."
+    )
+    print(setup_environment_help(recreate=True))
+    raise SystemExit(1)
+
 import argparse
 import getpass
 import json
@@ -11,11 +45,20 @@ import secrets
 import subprocess
 import time
 import warnings
+from urllib.parse import urlparse
 
-import requests
+try:
+    import requests
+except ImportError:
+    print(
+        "Setup dependencies are missing or incomplete. Install the hash-pinned project requirements, then retry."
+    )
+    print(setup_environment_help())
+    raise SystemExit(1) from None
 
 PAIRING_SECONDS = 300
 MAX_POLLS = 40
+PUBLIC_TEMPLATE = "Brendan-Lim/NUS-Canvas-Daily-Telegram-Reminder-Bot"
 
 
 class SetupError(Exception):
@@ -62,6 +105,10 @@ def gh_run(args: list[str], *, secret: str | None = None) -> str:
 def verify_repository(repo: str) -> str:
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
         raise SetupError("Use the repository name in OWNER/REPOSITORY format.")
+    if repo.lower() == PUBLIC_TEMPLATE.lower():
+        raise SetupError(
+            "The public template cannot receive personal secrets. Clone your own private copy."
+        )
     gh_run(["auth", "status", "--hostname", "github.com"])
     try:
         info = json.loads(
@@ -88,6 +135,95 @@ def verify_repository(repo: str) -> str:
             "Setup requires your own private repository and administration permission."
         )
     return info["nameWithOwner"]
+
+
+def git_run(args: list[str]) -> str:
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    try:
+        result = subprocess.run(
+            ["git", *args], text=True, capture_output=True, timeout=30, check=False, env=env
+        )
+    except (OSError, subprocess.SubprocessError):
+        raise SetupError(
+            "Git is unavailable or timed out. Install Git and run setup from your cloned project folder."
+        ) from None
+    if result.returncode:
+        raise SetupError(
+            "Could not inspect this Git checkout. Run setup from your cloned project folder."
+        )
+    return result.stdout.strip()
+
+
+def repository_from_remote(url: str) -> str | None:
+    """Accept GitHub HTTPS/SSH only; never echo a remote URL or its credentials."""
+    if not isinstance(url, str) or any(c.isspace() for c in url):
+        return None
+    if url.startswith("git@github.com:"):
+        path = url[len("git@github.com:") :]
+    else:
+        try:
+            parsed = urlparse(url)
+            if (
+                parsed.hostname != "github.com"
+                or parsed.query
+                or parsed.fragment
+                or parsed.password
+            ):
+                return None
+            if parsed.scheme == "https" and parsed.username is None and parsed.port in (None, 443):
+                path = parsed.path.removeprefix("/")
+            elif parsed.scheme == "ssh" and parsed.username == "git" and parsed.port in (None, 22):
+                path = parsed.path.removeprefix("/")
+            else:
+                return None
+        except ValueError:
+            return None
+    path = path.removesuffix(".git")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", path):
+        return None
+    if any(part in (".", "..") for part in path.split("/")):
+        return None
+    return path
+
+
+def resolve_repository(explicit: str | None = None) -> str:
+    if git_run(["rev-parse", "--is-inside-work-tree"]) != "true":
+        raise SetupError("Run setup inside your cloned project repository.")
+    remotes = git_run(["remote"]).splitlines()
+    candidates = {}
+    unsafe = False
+    for remote in remotes:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", remote):
+            raise SetupError("A Git remote name could not be safely inspected.")
+        for mode in ([], ["--push"]):
+            urls = git_run(["remote", "get-url", "--all", *mode, remote]).splitlines()
+            if not urls:
+                unsafe = True
+            for url in urls:
+                repo = repository_from_remote(url)
+                if repo is None:
+                    unsafe = True
+                else:
+                    candidates[repo.lower()] = repo
+    if explicit is not None:
+        if explicit.lower() not in candidates:
+            raise SetupError("--repo must match a safe GitHub remote in this checkout.")
+        selected = candidates[explicit.lower()]
+    elif unsafe or len(candidates) != 1:
+        raise SetupError(
+            "Repository detection is missing, unsafe or ambiguous. Check remotes, or select a matching private remote with --repo OWNER/REPOSITORY."
+        )
+    else:
+        selected = next(iter(candidates.values()))
+    return verify_repository(selected)
+
+
+def confirm_repository(repo: str) -> bool:
+    print(f"Destination: {repo} (verified private repository).")
+    answer = input(
+        "Replace this repository's three reminder Actions secrets? Type yes to continue: "
+    )
+    return answer.strip().lower() == "yes"
 
 
 class TelegramSetup:
@@ -247,22 +383,28 @@ def hidden(prompt: str) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--repo", required=True, help="Your private OWNER/REPOSITORY")
+    parser.add_argument(
+        "--repo", help="Optional private OWNER/REPOSITORY matching a checkout remote"
+    )
     args = parser.parse_args()
     try:
-        repo = verify_repository(args.repo)
-        print(f"Configuring Actions secrets for {repo}. Existing values will be replaced.")
+        repo = resolve_repository(args.repo)
+        if not confirm_repository(repo):
+            print("Setup cancelled; no tokens requested or secrets replaced.")
+            return 1
         canvas_token = hidden("Canvas API token (hidden): ")
         bot_token = hidden("Telegram bot token (hidden): ")
         telegram = TelegramSetup(bot_token)
         username = telegram.prepare()
         code = secrets.token_urlsafe(32)
         started = int(time.time())
-        print(
-            f"Open https://t.me/{username} in Telegram and send the following in its private chat within five minutes:"
-        )
+        print(f"1. Open your bot's PRIVATE CHAT inside Telegram: https://t.me/{username}")
+        print("2. Send the exact message below INSIDE TELEGRAM, not in Terminal or PowerShell:")
         print(f"/start {code}")
-        print("Keep this one-time code private. Do not send either API token in Telegram.")
+        print(
+            "3. Keep this terminal running while it verifies your chat. The code expires in five minutes."
+        )
+        print("Keep this one-time code private. Never paste either API token into Telegram.")
         cid = pair(telegram, code, started=started)
         provision(repo, canvas_token, bot_token, cid)
         print(

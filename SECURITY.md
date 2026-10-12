@@ -37,6 +37,11 @@ coursework, grade data, or private screenshots to public reports. Use fictional 
   secrets on stdin, with no shell, credential arguments, or secret files. Setup
   requires a private repository and admin access. It rejects execution in Actions
   and removes environment token overrides so the workflow `GITHUB_TOKEN` is not used.
+- Setup checks Python 3.12+ before optional imports, reports missing dependencies,
+  and detects the destination from safe GitHub checkout remotes. Explicit `--repo`
+  selection must match a checkout remote. Canonical name, private visibility,
+  administration permission, and an interactive `yes` confirmation are required
+  before requesting API tokens or replacing secrets. The public template is refused.
 - Three GitHub secret writes are not atomic. Rerun setup after provisioning failure.
   Existing `TELEGRAM_CHAT_ID` secrets remain valid; legacy manual configurations
   are not retrospectively verified by the wizard.
