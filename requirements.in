@@ -1,0 +1,2 @@
+# Only runtime dependency; transitives and hashes are in requirements.txt.
+requests==2.34.2

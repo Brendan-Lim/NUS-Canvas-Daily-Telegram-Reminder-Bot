@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -33,7 +33,7 @@ jobs:
         run: |
           if [[ -n "$CANVAS_TOKEN" && -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_ID" ]]; then
             echo 'ready=true' >> "$GITHUB_OUTPUT"
-          elif [[ "$GITHUB_EVENT_NAME" == 'workflow_dispatch' ]]; then
+          elif [[ -n "$CANVAS_TOKEN" || -n "$TELEGRAM_BOT_TOKEN" || -n "$TELEGRAM_CHAT_ID" || "$GITHUB_EVENT_NAME" == 'workflow_dispatch' ]]; then
             echo '::error::Add CANVAS_TOKEN, TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in repository Actions secrets.'
             exit 1
           else
@@ -41,7 +41,7 @@ jobs:
             echo 'ready=false' >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         if: steps.config.outputs.ready == 'true'
         with:
           python-version: '3.12'
@@ -49,7 +49,8 @@ jobs:
 
       - name: Install dependencies
         if: steps.config.outputs.ready == 'true'
-        run: python -m pip install -r requirements.txt
+        run: >-
+          python -m pip install --only-binary=:all: --require-hashes -r requirements.txt
 
       - name: Run offline tests
         if: steps.config.outputs.ready == 'true'

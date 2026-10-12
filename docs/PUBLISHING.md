@@ -1,65 +1,48 @@
-# Maintainer publishing checklist
+# Public repository maintenance and releases
 
-This document is for the original publisher. **Do not publish the old personal repository or its full history.** Build a separate, clean public template.
+The public repository already exists at
+`Brendan-Lim/NUS-Canvas-Daily-Telegram-Reminder-Bot`; its default branch is `main`.
+Do not initialize a replacement repository, import private history, or access the
+maintainer's separate personal bot repository.
 
-## 1. Review this release
+## Before merging or releasing
 
-- Confirm this directory contains **no personal tokens, chats, grades, or private student information**.
-- Review `LICENSE` and confirm you hold the rights to publish your implementation under MIT. The original `lavanyagarg112/nus-assistant-bot` has no license in the version reviewed; this release should contain only independently authored code.
-- Keep your existing working, private scheduled bot separate.
-- Run `python -m unittest discover -s tests -v`.
-- Check `.env` is not tracked, **including in Git history**. This release should start with a new Git history.
+1. Confirm the Git remote is the public repository above. Preserve unrelated work.
+2. Run unit tests, Ruff, compile checks, dependency audit, workflow validation,
+   and secret screening described in README. Inspect the entire diff. Use only
+   fictional test data. History screening is heuristic; it cannot prove absence.
+3. Validate action pins against official upstream release commits. Workflow
+   validation uses actionlint 1.7.12 with an upstream SHA-256-verified binary;
+   no downloaded setup scripts are executed.
+4. Keep `0 0 * * *` (08:00 SGT), existing secret names, and Python 3.12 compatibility.
+5. Push normally; never force-push or rewrite public history. When protected,
+   use a feature branch and reviewed PR. Wait for the **tests** CI check.
+6. Publish no tag or release until the pushed commit passes CI. For the first
+   release use `v1.0.0`; describe scan states, automatic pairing, limitations,
+   and the absence of live student-account verification.
 
-## 2. Create a *new* public repository
+The public template must contain no personal production secrets. Fully
+unconfigured scheduled reminders skip without contacting Canvas or Telegram;
+manual runs and partially configured deployments fail clearly. CI has no
+production secrets and does not execute `pull_request_target` contributor code.
 
-Suggested GitHub name: `nus-canvas-telegram-reminder`.
+## Repository settings
 
-From the **extracted public release folder**, use:
+- **Settings → General → Template repository:** enabled.
+- Description: personal, serverless NUS Canvas deadline reminders through Telegram
+  with secure automatic setup and GitHub Actions.
+- Topics: `nus`, `canvas-lms`, `telegram-bot`, `github-actions`, `student-tools`, `python`.
+- **Settings → Security → Advanced Security:** enable private vulnerability
+  reporting, dependency graph, Dependabot alerts and security updates where available.
+- **Settings → Actions → General:** read-only default workflow permissions;
+  disable approval of PRs by workflows. Require full action SHAs where supported.
+- **Settings → Branches → Add branch protection rule:** target `main`, require a PR
+  and one approving review, dismiss stale approvals, require the `tests` status
+  check and up-to-date branches, block force pushes and deletion. Keep administrator
+  enforcement off so the sole owner can administer the project; normal contributions
+  still use reviews and CI. Do not use an administrator bypass to merge failing code.
 
-```bash
-git init
-git branch -M main
-git add .
-git commit -m "Release open-source NUS Canvas Telegram reminder template"
-```
-
-Then choose either:
-
-**With GitHub CLI** (after `gh auth login`):
-
-```bash
-gh repo create Brendan-Lim/nus-canvas-telegram-reminder \
-  --public --source=. --remote=origin --push \
-  --description "Unofficial NUS Canvas deadline digest delivered to your own Telegram bot with GitHub Actions"
-```
-
-**With GitHub website:** create a new, **empty public** repo at https://github.com/new and then:
-
-```bash
-git remote add origin https://github.com/Brendan-Lim/nus-canvas-telegram-reminder.git
-git push -u origin main
-```
-
-Do **not** clone or copy the `.git` folder from the personal repository.
-
-## 3. Configure the public project
-
-1. Open **Settings → General** and turn on **Template repository**. Future students should use **Use this template** to generate their own **private** copies.
-2. Set repository description and topics: `nus`, `canvas-lms`, `telegram-bot`, `github-actions`, `student-tools`, `python`.
-3. Open **Settings → Security** and enable **Private vulnerability reporting** if available.
-4. Optionally enable Discussions. Keep Issues enabled for bugs.
-5. Review workflows under **Actions**. The official public template should have **no personal production secrets**; scheduled jobs without secrets simply skip. CI tests run without credentials.
-6. For a public launch, consider creating a release tagged `v1.0.0` with a concise changelog.
-7. Open the README on GitHub and check the Mermaid diagram, badges, and links render.
-
-## 4. Acceptance checks
-
-- Public source repository contains an MIT license, README, tests, and workflow files.
-- `Python tests` workflow passes without GitHub Actions secrets.
-- Public template's scheduled reminder prints a skip notice and **does not access Canvas** without credentials.
-- Each student is directed to create a new private repository with only their own secrets.
-- No personal GitHub Actions tokens/Canvas tokens appear anywhere in public Git history.
-
-## Limitations
-
-This environment's GitHub connection could read earlier public code but not the latest private repository and was unable to create a new repository. Publishing requires an authenticated GitHub CLI or using the GitHub UI.
+Configure protection after an initial verified push so it does not obstruct the
+requested hardening delivery. GitHub plan or API restrictions may require the
+owner to apply settings manually. Record only settings confirmed by a follow-up
+API read; a failed API call is not a completed change.

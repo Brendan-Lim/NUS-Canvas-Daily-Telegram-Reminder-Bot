@@ -1,28 +1,71 @@
 # Security policy
 
-This project helps students use their **own** NUS Canvas tokens in **their own** GitHub Actions environments. A Canvas API token is a powerful bearer credential.
+This template uses each student's own Canvas token, private GitHub repository,
+and dedicated Telegram bot. A Canvas API token is a powerful bearer credential.
 
-## Report a vulnerability
+## Report privately
 
-Please use GitHub's **Report a vulnerability** / private vulnerability reporting feature on this repository if the maintainer has enabled it. Otherwise, contact the maintainer privately through their GitHub profile before publishing exploit details.
+Use **Security → Report a vulnerability** on the public repository. If private
+reporting is unavailable, contact the maintainer privately through their GitHub
+profile before publishing exploit details. Never attach real tokens, chat IDs,
+coursework, grade data, or private screenshots to public reports. Use fictional data.
 
-**Never submit actual Canvas tokens, Telegram bot tokens, chat IDs, grade data, or screenshots of those secrets in public issues, pull requests, discussions, or CI logs.** Replace them with fictional strings.
+## Trust boundaries and controls
 
-## Threat model
+- There is no shared server, registry, or database. The maintainer does not collect
+  credentials. GitHub processes secrets while workflows execute.
+- Anyone who can alter your workflows may be able to extract Actions secrets.
+  Keep your deployment private, review collaborators and updates, and use expiring tokens.
+- Canvas bearer requests are GET-only, pinned to HTTPS `canvas.nus.edu.sg` on
+  port 443 under `/api/v1/`. Redirects and unsafe pagination are refused before
+  forwarding credentials. Retries, pagination, timeouts, and total scan runtime are bounded.
+- Diagnostics never intentionally include tokens, response bodies, course names,
+  assignment titles, or user identifiers. Operational Telegram warnings contain
+  no coursework. Regular digests intentionally contain your deadline information.
+- Telegram receives titles, course names, dates, and links. Bot chats are **not
+  end-to-end encrypted**. Consider university data policies before enabling delivery.
+- Local setup uses a cryptographically random, five-minute pairing code and accepts
+  only an exact `/start CODE` message from the matching private-chat user. Edited,
+  forwarded, group, channel, stale, and unrelated messages are rejected. Ambiguous
+  claimants in received/queued updates cause failure. Protect the code: anyone who
+  learns it before pairing finishes may claim the destination. Pairing verifies
+  possession of the code and Telegram chat, not a legal or university identity.
+- Use a fresh bot. Setup briefly consumes/acknowledges updates, never deletes a
+  webhook, and cannot detect every competing client. It does not depend on old
+  retained updates, and stops after success, timeout, or error.
+- API tokens use hidden terminal input and remain in memory. GitHub CLI receives
+  secrets on stdin, with no shell, credential arguments, or secret files. Setup
+  requires a private repository and admin access. It rejects execution in Actions
+  and removes environment token overrides so the workflow `GITHUB_TOKEN` is not used.
+- Three GitHub secret writes are not atomic. Rerun setup after provisioning failure.
+  Existing `TELEGRAM_CHAT_ID` secrets remain valid; legacy manual configurations
+  are not retrospectively verified by the wizard.
+- Dependencies and transitives are hash-pinned. CI audits known advisories, runs
+  static security rules, and screens tracked files and available Git blobs.
+  Screening cannot prove absence of every credential or student-data format.
+- CI runs without production secrets; action references are immutable upstream
+  SHAs. Do not add untrusted PR execution through `pull_request_target`.
 
-- Each student's personal repository is the credential boundary; this project intentionally has no shared server or shared user database.
-- GitHub Actions processes secrets while a run executes. Anyone with sufficient write/admin access to a student's repository can potentially change its workflow to extract them; review collaborators and workflow changes.
-- Telegram receives the course names, assignment titles, dates, and links in the reminders; those messages are not end-to-end encrypted bot chats.
-- The Canvas API client only sends bearer credentials to the pinned HTTPS `canvas.nus.edu.sg` API origin; it rejects cross-origin pagination and redirects.
-- Public source code should never include real `.env` files or credentials, including in commit history.
+## Operational limitations
 
-## If a token is exposed
+Complete scans cover only documented supported API data. Partial results warn
+that some information was not checked; they cannot establish an all clear.
+Authentication or unsafe responses fail closed. Partial and failed scans return
+nonzero even if their Telegram warning arrives. Delivery timeouts can leave an
+uncertain or partial delivery; no exactly-once guarantee or automatic send retry
+is provided. Check Canvas directly when a warning appears or reminders stop.
 
-1. Revoke the Canvas token in **NUS Canvas → Account → Settings → Approved Integrations** (not just the GitHub secret).
-2. Replace `CANVAS_TOKEN` in GitHub Actions secrets after creating a new expiring token.
-3. If the Telegram token was exposed, regenerate/revoke it via [@BotFather](https://t.me/BotFather) and replace `TELEGRAM_BOT_TOKEN`.
-4. Review recent Actions runs and repository access for unauthorized changes.
+Mocked tests cannot establish live service compatibility, institution permissions,
+or successful secret provisioning for your account. Test your own private copy
+with a manual Actions run after setup and token rotation.
 
-## Supported versions
+## If a token is exposed or you want to stop
 
-Security issues should be reproduced on the latest `main` branch. See the repository's release tags for versioned snapshots if published.
+1. Revoke the Canvas token in **Canvas → Account → Settings → Approved Integrations**.
+2. Create a new expiring token and replace `CANVAS_TOKEN` in your private Actions secrets.
+3. Revoke/regenerate an exposed Telegram bot token with **@BotFather** and rerun setup.
+4. Review Actions runs, collaborators, and workflow edits. Removing a GitHub secret
+   alone does not revoke a token at its provider.
+5. Disable the daily workflow and revoke unused tokens when stopping reminders.
+
+Security fixes target the latest `main` and any published supported release.
