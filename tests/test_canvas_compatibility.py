@@ -16,6 +16,9 @@ class EndpointDiagnosticsTests(unittest.TestCase):
             "courses": "Course discovery",
             "courses/845391/assignments": "Course assignment listing",
             "courses/845391/quizzes": "Course quiz listing",
+            "courses/845391/tabs": "Course navigation lookup",
+            "planner/items": "Planner quiz supplement",
+            "courses/845391/quizzes/772345": "Known quiz lookup",
             "courses/845391/quizzes/772345/submission": "Quiz submission lookup",
             "courses/845391/assignments/991234": "Linked assignment lookup",
             "courses/845391/quizzes/assignment_overrides": "Quiz override date lookup",
@@ -157,9 +160,9 @@ class OverrideTests(unittest.TestCase):
         )
         return r.gather_deadlines(client, now=NOW), client
 
-    def test_resolved_effective_dates_no_longer_cause_unnecessary_partial(self):
+    def test_resolved_effective_dates_succeed_without_warnings(self):
         result, client = self.scan()
-        self.assertEqual(result.status, r.ScanStatus.COMPLETE)
+        self.assertEqual(result.status, r.ScanStatus.SUCCESS)
         self.assertEqual(len(result.deadlines), 1)
         self.assertFalse(result.deadlines[0].submission_unknown)
         self.assertEqual(client.one.call_count, 1)
@@ -169,7 +172,7 @@ class OverrideTests(unittest.TestCase):
             quiz={"all_dates": [{"base": True, "due_at": iso(timedelta(days=1))}]},
             override_error=r.ServiceError("HTTP 404"),
         )
-        self.assertEqual(result.status, r.ScanStatus.COMPLETE)
+        self.assertEqual(result.status, r.ScanStatus.SUCCESS)
         self.assertEqual(len(result.deadlines), 1)
         self.assertFalse(
             any(
@@ -182,7 +185,7 @@ class OverrideTests(unittest.TestCase):
         result, client = self.scan(
             quiz={"all_dates": [{"base": True, "due_at": iso(timedelta(days=3))}]}
         )
-        self.assertEqual(result.status, r.ScanStatus.COMPLETE)
+        self.assertEqual(result.status, r.ScanStatus.SUCCESS)
         self.assertTrue(
             any(
                 call.args[0].endswith("assignment_overrides")
@@ -192,7 +195,7 @@ class OverrideTests(unittest.TestCase):
 
     def test_effective_date_preferred_over_generic_and_all_dates(self):
         result, _ = self.scan(dates=iso(timedelta(days=4)))
-        self.assertEqual(result.status, r.ScanStatus.COMPLETE)
+        self.assertEqual(result.status, r.ScanStatus.SUCCESS)
         self.assertEqual(result.deadlines[0].due_at, NOW + timedelta(days=4))
 
     def test_effective_date_can_move_into_and_out_of_window(self):
@@ -201,17 +204,18 @@ class OverrideTests(unittest.TestCase):
         )
         self.assertEqual(len(result.deadlines), 1)
         result, _ = self.scan(dates=iso(timedelta(days=10)))
-        self.assertEqual(result.status, r.ScanStatus.COMPLETE)
+        self.assertEqual(result.status, r.ScanStatus.SUCCESS)
         self.assertEqual(result.deadlines, [])
 
     def test_null_effective_due_date_never_falls_back(self):
         result, _ = self.scan(records=[{"quiz_id": 9, "due_dates": [{"due_at": None}]}])
-        self.assertEqual(result.status, r.ScanStatus.COMPLETE)
+        self.assertEqual(result.status, r.ScanStatus.SUCCESS)
         self.assertEqual(result.deadlines, [])
 
-    def test_missing_restricted_and_ambiguous_effective_dates_are_partial(self):
+    def test_missing_restricted_and_ambiguous_effective_dates_fail(self):
         values = (
             [],
+            [None],
             [{"quiz_id": 10, "due_dates": [{"due_at": iso(timedelta(days=1))}]}],
             [{"quiz_id": 9, "due_dates": []}],
             [{"quiz_id": 9, "due_dates": [{}, {}]}],
@@ -224,7 +228,7 @@ class OverrideTests(unittest.TestCase):
         for records in values:
             with self.subTest(records=records):
                 result, _ = self.scan(records=records)
-                self.assertEqual(result.status, r.ScanStatus.PARTIAL)
+                self.assertEqual(result.status, r.ScanStatus.FAILURE)
                 self.assertEqual(result.deadlines, [])
                 self.assertTrue(any("Quiz override date lookup" in d for d in result.diagnostics))
         for status in (403, 404):
@@ -234,23 +238,23 @@ class OverrideTests(unittest.TestCase):
                         f"Quiz override date lookup failed (HTTP {status})"
                     )
                 )
-                self.assertEqual(result.status, r.ScanStatus.PARTIAL)
+                self.assertEqual(result.status, r.ScanStatus.FAILURE)
                 self.assertEqual(result.deadlines, [])
 
     def test_fatal_override_error_is_failed(self):
         result, _ = self.scan(override_error=r.ServiceError("Unsafe pagination", fatal=True))
-        self.assertEqual(result.status, r.ScanStatus.FAILED)
+        self.assertEqual(result.status, r.ScanStatus.FAILURE)
         self.assertEqual(result.deadlines, [])
 
     def test_only_visible_to_overrides_resolves_even_without_all_dates(self):
         result, _ = self.scan(quiz={"all_dates": None, "only_visible_to_overrides": True})
-        self.assertEqual(result.status, r.ScanStatus.COMPLETE)
+        self.assertEqual(result.status, r.ScanStatus.SUCCESS)
 
     def test_completed_and_pending_review_still_filtered(self):
         for state in ("complete", "pending_review"):
             with self.subTest(state=state):
                 result, _ = self.scan(submissions={"quiz_submissions": [{"workflow_state": state}]})
-                self.assertEqual(result.status, r.ScanStatus.COMPLETE)
+                self.assertEqual(result.status, r.ScanStatus.SUCCESS)
                 self.assertEqual(result.deadlines, [])
 
 
@@ -266,14 +270,14 @@ class CurrentUserSubmissionTests(unittest.TestCase):
 
     def test_successful_empty_list_confirms_never_attempted(self):
         result = self.scan({"quiz_submissions": []})
-        self.assertEqual(result.status, r.ScanStatus.COMPLETE)
+        self.assertEqual(result.status, r.ScanStatus.SUCCESS)
         self.assertFalse(result.deadlines[0].submission_unknown)
 
     def test_unavailable_and_restricted_submissions_remain_unknown(self):
         for status in (403, 404):
             with self.subTest(status=status):
                 result = self.scan({}, status)
-                self.assertEqual(result.status, r.ScanStatus.PARTIAL)
+                self.assertEqual(result.status, r.ScanStatus.SUCCESS)
                 self.assertTrue(result.deadlines[0].submission_unknown)
                 self.assertIn(f"Quiz submission lookup failed (HTTP {status})", result.diagnostics)
 
@@ -281,7 +285,7 @@ class CurrentUserSubmissionTests(unittest.TestCase):
         for payload in ({}, {"quiz_submissions": None}, {"quiz_submissions": [{}]}):
             with self.subTest(payload=payload):
                 result = self.scan(payload)
-                self.assertEqual(result.status, r.ScanStatus.PARTIAL)
+                self.assertEqual(result.status, r.ScanStatus.SUCCESS)
                 self.assertTrue(result.deadlines[0].submission_unknown)
 
     def test_in_progress_is_incomplete_and_latest_attempt_wins(self):
@@ -292,7 +296,7 @@ class CurrentUserSubmissionTests(unittest.TestCase):
                 ]
             }
         )
-        self.assertEqual(result.status, r.ScanStatus.COMPLETE)
+        self.assertEqual(result.status, r.ScanStatus.SUCCESS)
         self.assertFalse(result.deadlines[0].submission_unknown)
         result = self.scan(
             {
@@ -302,8 +306,8 @@ class CurrentUserSubmissionTests(unittest.TestCase):
                 ]
             }
         )
-        self.assertEqual(result.status, r.ScanStatus.COMPLETE)
+        self.assertEqual(result.status, r.ScanStatus.SUCCESS)
         self.assertEqual(len(result.deadlines), 1)
 
     def test_bad_credentials_fail_closed(self):
-        self.assertEqual(self.scan({}, 401).status, r.ScanStatus.FAILED)
+        self.assertEqual(self.scan({}, 401).status, r.ScanStatus.FAILURE)

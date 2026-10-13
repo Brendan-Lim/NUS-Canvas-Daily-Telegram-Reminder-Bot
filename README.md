@@ -133,7 +133,7 @@ Keep the terminal running while verification waits. The random code expires afte
 
 In your private repository, open **Actions → Daily NUS deadline reminder → Run workflow**. Enable Actions if prompted, then check the run result and your Telegram chat.
 
-A complete scan sends a digest even if nothing is due. Partial and failed scans warn you to check Canvas and fail the workflow; Telegram delivery failures also fail it. Your computer can now be switched off.
+A successful run sends a digest even if nothing is due. Optional quiz coverage or submission warnings appear in the digest without failing the workflow. Required processing or Telegram delivery failures fail it. Your computer can now be switched off.
 
 <details>
 <summary><strong>What setup saves, and how pairing protects your chat</strong></summary>
@@ -175,7 +175,9 @@ The script runs once, checks supported deadlines, sends a digest, and exits. The
 | **Classic Quizzes** | Available quiz endpoints; linked assignment records prevent duplicates and generic-date fallback. Standalone quizzes use the current-user submission endpoint. |
 | **New Quizzes** | Canvas assignment records, labelled as quizzes when Canvas identifies them. |
 
-Standalone Classic Quizzes use Canvas's current-student dates. A sole matching base date is already valid for everyone; other override metadata is resolved through the documented quiz assignment overrides endpoint. If required student dates are unavailable or ambiguous, the quiz is omitted with a partial warning rather than given a generic fallback date. This project does not detect every Canvas activity type.
+Standalone Classic Quizzes use Canvas's current-student dates. A sole matching base date is already valid for everyone; other override metadata is resolved through the documented quiz assignment overrides endpoint. If required student dates are unavailable or ambiguous, the run fails rather than substitute a generic date.
+
+If a course restricts its Classic Quiz listing, assignment-linked quizzes remain covered and a paginated Planner lookup may recover standalone quizzes. The digest discloses the remaining coverage limitation; a hidden Quiz tab does not prove that no quizzes exist. This project does not detect every Canvas activity type.
 
 <details>
 <summary><strong>Submission filtering and activities outside the supported scope</strong></summary>
@@ -190,11 +192,12 @@ Standalone Classic Quizzes use Canvas's current-student dates. A sole matching b
 
 </details>
 
-| Scan result | What your reminder means |
+| Operational outcome | What your reminder means |
 | :--- | :--- |
-| **COMPLETE** | Required supported API information was checked. An empty digest is allowed; activities outside this scope may still be missed. |
-| **PARTIAL** | Some courses, dates, or submission states could not be verified. Available results include a warning, and the workflow fails. An empty partial result is **not an all clear**. |
-| **FAILED** | No useful information could be checked reliably, authentication failed, or unsafe API behavior was detected. A short failure warning is attempted, and the workflow fails even if it arrives. |
+| **SUCCESS** | Required processing and Telegram delivery completed. Optional Classic Quiz coverage or submission checks may be unavailable; the digest discloses these limitations. Success does not guarantee exhaustive Canvas coverage. |
+| **FAILURE** | Required course/assignment retrieval, known activity dates, authentication, API safety, or Telegram delivery failed. A short scan-failure warning is attempted; delivering it does not make the workflow successful. |
+
+A known deadline with unknown submission status stays visible as **submission unverified**. When optional quiz coverage is unavailable, an empty digest says no upcoming items were found in the information checked and is **not an all clear**. Check Canvas directly.
 
 **Check Canvas directly when a warning appears or reminders stop.** Manual reruns may resend messages. A multi-message digest can be partly delivered before a failure; there is no exactly-once delivery guarantee or deduplication database.
 
@@ -276,13 +279,14 @@ If repository detection fails, run setup from your cloned private repository. Ch
 </details>
 
 <details>
-<summary><strong>Canvas fails, or the digest says “partial scan”</strong></summary>
+<summary><strong>Canvas fails, or the digest includes a coverage warning</strong></summary>
 
 - **HTTP 401:** generate a new personal Canvas token, replace `CANVAS_TOKEN`, and revoke the old token.
-- **HTTP 403/404 or a partial warning:** check Canvas directly. Your institution or course may restrict endpoints; an unavailable endpoint is not an empty result.
+- **Course quiz listing HTTP 403/404:** Canvas can restrict Classic Quiz listing when its Quiz tab is unavailable. Assignment-linked quizzes still use required assignment data; optional Planner recovery cannot establish exhaustive coverage. Check Canvas directly.
+- **Required course/assignment retrieval or date errors:** the workflow fails. An unavailable required endpoint is never treated as an empty result.
 - **HTTP 429 or a server error:** retries are bounded. Try a later manual run and check Canvas directly meanwhile.
 
-Logs now name the failing operation, such as **Course quiz listing**, **Quiz submission lookup**, **Linked assignment lookup**, or **Quiz override date lookup**, without identifiers or coursework. A digest can be accurate yet partial because submission information remains unknown. Partial scans intentionally keep their nonzero exit code; a delivered message does not establish completeness. See the [Canvas API compatibility notes](docs/CANVAS_API.md) for the documented contracts and live verification steps.
+Logs now name the failing operation, such as **Course quiz listing**, **Quiz submission lookup**, **Linked assignment lookup**, or **Quiz override date lookup**, without identifiers or coursework. A successful run may include coverage warnings or **submission unverified** labels. These do not add a third workflow outcome. Required processing and delivery failures return a nonzero exit code; a delivered message does not establish exhaustive coverage. See the [Canvas API compatibility notes](docs/CANVAS_API.md) for the documented contracts and live verification steps.
 
 </details>
 
